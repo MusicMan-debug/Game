@@ -1,0 +1,126 @@
+extends CharacterBody2D
+
+# --- Tuning ---
+var speed: float = 800.0                 # movement speed (pixels/sec)
+var attack_cooldown: float = 0.25        # time between swings
+var attack_active_time: float = 0.10     # how long hitbox is live per swing
+
+# --- Runtime state ---
+var attacking: bool = false
+var attack_timer: float = 0.0
+var attack_active_timer: float = 0.0
+var last_facing: Vector2 = Vector2.RIGHT # used to keep hitbox in front when standing
+
+# --- Node refs ---
+@onready var hitbox: Area2D = $AttackHitbox
+# Support either CollisionPolygon2D or CollisionShape2D as the hitbox shape:
+@onready var hitbox_poly := $AttackHitbox.get_node_or_null("CollisionPolygon2D")
+@onready var hitbox_shape := $AttackHitbox.get_node_or_null("CollisionShape2D")
+
+func _ready() -> void:
+	# Sanity checks
+	if hitbox == null:
+		push_error('Player: AttackHitbox (Area2D) not found under Player. Expected path: Player/AttackHitbox')
+		return
+
+	_enable_hitbox(false)
+
+	# Connect overlap signals so attacks can register hits
+	hitbox.area_entered.connect(_on_hitbox_area_entered)
+	hitbox.body_entered.connect(_on_hitbox_body_entered)
+
+
+func _input(event: InputEvent) -> void:
+	if event.is_action_pressed("attack"):
+		_try_attack()
+
+
+func _physics_process(delta: float) -> void:
+	# --- WASD movement (custom actions) ---
+	var input_vec := Vector2(
+		int(Input.is_action_pressed("move_right")) - int(Input.is_action_pressed("move_left")),
+		int(Input.is_action_pressed("move_down"))  - int(Input.is_action_pressed("move_up"))
+	)
+
+	if input_vec != Vector2.ZERO:
+		input_vec = input_vec.normalized()
+		last_facing = input_vec
+
+	velocity = input_vec * speed
+	move_and_slide()
+
+	# Keep hitbox in front of the character (even when standing still)
+	_update_hitbox_offset(last_facing)
+
+	_handle_attack_timers(delta)
+
+
+# --- Attack flow ---
+func _try_attack() -> void:
+	if attacking or attack_timer > 0.0:
+		return  # still cooling down
+
+	attacking = true
+	attack_active_timer = attack_active_time
+	attack_timer = attack_cooldown
+
+	_enable_hitbox(true)
+	print("ATTACK START")
+
+
+func _handle_attack_timers(delta: float) -> void:
+	if attack_timer > 0.0:
+		attack_timer -= delta
+
+	if attacking:
+		attack_active_timer -= delta
+		if attack_active_timer <= 0.0:
+			attacking = false
+			_enable_hitbox(false)
+			print("ATTACK END")
+
+
+# --- Hitbox helpers ---
+func _enable_hitbox(on: bool) -> void:
+	if hitbox == null:
+		return
+	hitbox.monitoring = on
+	# Toggle either polygon or shape, whichever you have
+	if hitbox_poly:
+		hitbox_poly.disabled = not on
+	if hitbox_shape:
+		hitbox_shape.disabled = not on
+
+
+func _update_hitbox_offset(dir: Vector2) -> void:
+	# Place hitbox slightly ahead of the player in facing direction
+	if hitbox == null:
+		return
+	var distance := 20.0
+	if dir == Vector2.ZERO:
+		dir = last_facing
+	hitbox.position = dir.normalized() * distance
+
+
+# --- Signal handlers from AttackHitbox ---
+func _on_hitbox_area_entered(area: Area2D) -> void:
+	_attempt_damage(area)
+
+func _on_hitbox_body_entered(body: Node) -> void:
+	_attempt_damage(body)
+
+
+# --- Apply damage if target can take it ---
+func _attempt_damage(target: Node) -> void:
+	if not attacking:
+		return
+
+	# If we hit a child (e.g., Hurtbox), resolve up to a parent that owns health
+	var victim: Node = target
+	if not victim.has_method("apply_damage") and victim.get_parent() != null:
+		victim = victim.get_parent()
+
+	if victim.is_in_group("damageable") and victim.has_method("apply_damage"):
+		var dir: Vector2 = (victim.global_position - global_position).normalized()
+		victim.apply_damage(10, dir)  # test damage
+		print("HIT:", victim.name, "HP -10")
